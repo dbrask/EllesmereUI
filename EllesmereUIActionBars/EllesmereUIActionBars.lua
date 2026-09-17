@@ -1312,8 +1312,8 @@ local SHOWGRID = {
 local _controllerButtons = {}
 
 ActionButtonController:Execute([[
-    _eabBtnMap = table.new()
-    _eabPendingVis = table.new()
+    _eabBtnMap = newtable()
+    _eabPendingVis = newtable()
 ]])
 
 -- Secure method: SetShowGrid (bitwise flag toggle). Restricted Lua has no bit
@@ -1584,7 +1584,7 @@ do
     ]])
 
     -- Secure table of bar frames that receive state broadcasts
-    OverrideController:Execute([[ _eabBarFrames = table.new() ]])
+    OverrideController:Execute([[ _eabBarFrames = newtable() ]])
 
     -- overrideui driven by [overridebar][vehicleui] macro instead of parenting
     -- to OverrideActionBar (which would taint the protected frame).
