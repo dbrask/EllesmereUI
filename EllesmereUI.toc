@@ -11,6 +11,9 @@
 # Pre-12.1 client failsafe -- MUST load first (arms the per-file guard line)
 EllesmereUI_ClientGate.lua
 
+# Restore C_* aliases Forever removed (no-op on retail where the globals remain)
+EllesmereUI_APICompat.lua
+
 # Libraries
 Libs\LibStub\LibStub.lua
 Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
