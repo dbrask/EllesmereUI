@@ -5,7 +5,7 @@ if EUI_CLIENT_BLOCKED then return end -- pre-12.1 client failsafe (EllesmereUI_C
 --  eliminating the taint surface from reusing Blizzard's protected buttons.
 --  Stance/Pet bars still reuse Blizzard buttons (own secure handling).
 --  Keybinds: SetOverrideBindingClick for all bars. Paging: RegisterStateDriver
---  + _childupdate-eab-page with explicit action attrs.
+--  + bar actionpage (CalculateAction path 1: SetID(i) + useparent-actionpage).
 -------------------------------------------------------------------------------
 local ADDON_NAME, ns = ...
 if not (EllesmereUI and EllesmereUI._ModuleNS) then EUI_CLIENT_BLOCKED = true; return end -- stale-parent guard: a partially updated install (old parent, new child) goes dormant via the line-1 failsafe instead of erroring
@@ -867,7 +867,7 @@ ns.ButtonHasAction = ButtonHasAction
 local function ForceCooldownPaint(btn)
     if not btn then return end
     local cd = btn.cooldown
-    local action = btn:GetAttribute("action")
+    local action = EAB_VTABLE.ActionSlot(btn)
     if cd and action and HasAction(action) and C_ActionBar and C_ActionBar.GetActionCooldown then
         local cdInfo = C_ActionBar.GetActionCooldown(action)
         local durObj = cdInfo and cdInfo.isActive and C_ActionBar.GetActionCooldownDuration
@@ -1371,18 +1371,26 @@ ActionButtonController:SetAttributeNoHandler("_onattributechanged", [[
 
 -- Per-button secure snippets (installed via WrapScript during registration)
 local BTN_ON_ATTRIBUTE_CHANGED = [[
-    if name == "action" then
+    if name == "actionpage" or name == "action" then
+        local page, slot
+        if name == "actionpage" then
+            page = tonumber(value) or 1
+            slot = (self:GetID() or 0) + (page - 1) * 12
+        else
+            slot = tonumber(value)
+        end
         local prev = _eabBtnMap[self]
-        if prev ~= value then
-            _eabBtnMap[self] = value
-            _eabPendingVis[self] = value
+        if slot and prev ~= slot then
+            _eabBtnMap[self] = slot
+            _eabPendingVis[self] = slot
             control:SetAttribute("flush", 0)
         end
     end
 ]]
 
 local BTN_POST_CLICK = [[
-    control:RunAttribute("ForActionSlot", self:GetAttribute("action"), "UpdateShown")
+    local page = tonumber(self:GetAttribute("actionpage")) or 1
+    control:RunAttribute("ForActionSlot", (self:GetID() or 0) + (page - 1) * 12, "UpdateShown")
 ]]
 
 -- Forward the drag kind so the post-handler can refresh visibility for the
@@ -1392,7 +1400,8 @@ local BTN_ON_RECEIVE_DRAG_BEFORE = [[
 ]]
 
 local BTN_ON_RECEIVE_DRAG_AFTER = [[
-    control:RunAttribute("ForActionSlot", self:GetAttribute("action"), "UpdateShown")
+    local page = tonumber(self:GetAttribute("actionpage")) or 1
+    control:RunAttribute("ForActionSlot", (self:GetID() or 0) + (page - 1) * 12, "UpdateShown")
 ]]
 
 -- Re-evaluate on show/hide to catch delayed state changes from the secure environment.
@@ -1485,7 +1494,9 @@ local function RegisterButtonWithController(btn)
             if (cur % 32) >= 2 and (self:GetAttribute("eab-withincutoff") or 1) ~= 0 then
                 vis = true
             else
-                vis = (cur > 0 or HasAction(self:GetAttribute("action") or 0))
+                local page = tonumber(self:GetAttribute("actionpage")) or 1
+                local slot = (self:GetID() or 0) + (page - 1) * 12
+                vis = (cur > 0 or HasAction(slot))
                     and not self:GetAttribute("statehidden")
             end
             if vis then
@@ -1507,7 +1518,8 @@ local function RegisterButtonWithController(btn)
     -- restore as SetShowGrid, so a mid-drag flush cannot re-hide a revealed target.
     btn:SetAttributeNoHandler("UpdateShown", [[
         local cur = self:GetAttribute("showgrid") or 0
-        local hasAct = HasAction(self:GetAttribute("action") or 0)
+        local page = tonumber(self:GetAttribute("actionpage")) or 1
+        local hasAct = HasAction((self:GetID() or 0) + (page - 1) * 12)
         local hidden = self:GetAttribute("statehidden")
         local vis
         -- >= 2, not > 0: bit 1 is Blizzard's CVAR reason (see SetShowGrid
@@ -1534,7 +1546,8 @@ local function RegisterButtonWithController(btn)
     ActionButtonController:SetFrameRef("add", btn)
     ActionButtonController:Execute([[
         local b = self:GetFrameRef("add")
-        _eabBtnMap[b] = b:GetAttribute("action") or 0
+        local page = tonumber(b:GetAttribute("actionpage")) or 1
+        _eabBtnMap[b] = (b:GetID() or 0) + (page - 1) * 12
     ]])
 
     -- Mark the button so we can detect it survived a /reload
@@ -1712,11 +1725,11 @@ _secureHandler:SetAttribute("_onattributechanged", [=[
                 elseif barKey == "StanceBar" then
                     -- Stance buttons keep their native handling
                 else
-                    -- All action bar buttons use explicit action attributes.
-                    btnRef:SetID(0)
-                    if actionSlot and actionSlot ~= "" and actionSlot ~= "0" then
-                        btnRef:SetAttribute("action", tonumber(actionSlot))
-                    end
+                    -- Stock CalculateAction path 1: ID 1-12, actionpage on the bar.
+                    -- Never write "action" from this handler (taints PlaceAction).
+                    local idx = tonumber(actionSlot) or 1
+                    btnRef:SetID(idx)
+                    btnRef:SetAttribute("action", nil)
                 end
                 if show == "1" then
                     btnRef:Show()
@@ -1749,8 +1762,18 @@ _secureHandler:SetAttribute("_onattributechanged", [=[
         end
     end
 
-    -- Step 5: MainBar paging is driven by _onstate-page -> ChildUpdate("eab-page").
-    -- Each button's _childupdate-eab-page recalculates the action attribute.
+    -- Step 5: push actionpage onto buttons so OnAttributeChanged -> UpdateAction
+    -- caches self.action from CalculateAction path 1 (ID + actionpage).
+    for i = 1, barFrameCount do
+        local frameData = self:GetAttribute("barframe-" .. i)
+        if frameData then
+            local barKey = strsplit("|", frameData)
+            local barRef = self:GetFrameRef("bar-" .. barKey)
+            if barRef then
+                barRef:ChildUpdate("eab-page", barRef:GetAttribute("actionpage") or barRef:GetAttribute("state-page") or 1)
+            end
+        end
+    end
 
     -- Step 6: All keybind dispatch uses SetOverrideBindingClick (set by UpdateKeybinds).
 ]=])
@@ -1966,6 +1989,26 @@ local BAR_SLOT_OFFSETS = {
     Bar10 = 108,    -- slots 109-120 (action page 10 -- custom bar, no native frame)
 }
 
+-- Insecure slot for EAB buttons: ID + (bar actionpage-1)*12. Never reads
+-- btn.action (secret/taint in combat) and never writes the "action" attribute.
+-- Stance/pet are in buttonToBar but have no BAR_SLOT_OFFSETS -> nil.
+-- Unknown frames (ExtraActionButton, Override) fall through to GetAttribute("action").
+EAB_VTABLE.ActionSlot = function(btn)
+    if not btn then return nil end
+    local info = buttonToBar[btn]
+    if info then
+        if not BAR_SLOT_OFFSETS[info.barKey] then return nil end
+        local id = btn.GetID and btn:GetID()
+        local frame = barFrames[info.barKey]
+        local page = (frame and tonumber(frame:GetAttribute("actionpage"))) or 1
+        if id and id > 0 then
+            return id + (page - 1) * (NUM_ACTIONBAR_BUTTONS or 12)
+        end
+        return BAR_SLOT_OFFSETS[info.barKey] + info.index
+    end
+    return btn.GetAttribute and btn:GetAttribute("action")
+end
+
 -- Binding name prefixes per bar: MULTIACTIONBAR<N>BUTTON, where N is Blizzard's
 -- internal bar numbering (not our sequential bar IDs).
 local BINDING_MAP = {
@@ -2072,6 +2115,7 @@ local function GetOrCreateButton(slot, parent, info, index, skipProtected)
     if allButtons[slot] then
         if not skipProtected then
             allButtons[slot]:SetParent(parent)
+            if index then allButtons[slot]:SetID(index) end
         end
         return allButtons[slot]
     end
@@ -2156,7 +2200,7 @@ local function GetOrCreateButton(slot, parent, info, index, skipProtected)
                 -- pass). The display-complete edge is the exact moment occlusion
                 -- lapses; nil-check cost for every non-charge button.
                 if b and b.chargeCooldown and ns.UpdateChargeNumbersVisibility then
-                    local action = b.GetAttribute and b:GetAttribute("action")
+                    local action = EAB_VTABLE.ActionSlot(b)
                     if action and HasAction(action) then
                         ns.UpdateChargeNumbersVisibility(b, b.chargeCooldown,
                             C_ActionBar.GetActionCooldown(action),
@@ -2253,8 +2297,10 @@ local function GetOrCreateButton(slot, parent, info, index, skipProtected)
         end
         if not skipProtected then
             btn:SetParent(parent)
-            btn:SetID(0)
-            btn:SetAttribute("action", slot)
+            -- Path 1: ID 1-12 within the bar; slot = ID + (actionpage-1)*12.
+            -- Never SetAttribute("action") from insecure Lua: that taints
+            -- self.action via OnAttributeChanged and blocks PlaceAction on Forever.
+            btn:SetID(index or 0)
         end
     end
 
@@ -2700,8 +2746,8 @@ ns.LayoutPagingFrame = LayoutPagingFrame
 -- stop the early release; the fix was routing empower KEYS native instead.
 -- Do not re-attempt that shape without new field data.)
 ns._eabEmpowerSnippet = [[
-    local slot = self:GetAttribute('action')
-    if slot and IsPressHoldReleaseSpell then
+    local slot = (self:GetID() or 0) + ((tonumber(self:GetAttribute('actionpage')) or 1) - 1) * 12
+    if slot and slot > 0 and IsPressHoldReleaseSpell then
         local actionType, id, subType = GetActionInfo(slot)
         local spellID = nil
         if actionType == 'spell' then
@@ -2760,11 +2806,10 @@ end
 ]]
 
 -- Build the _childupdate-eab-page snippet for a button at the given 1-based bar
--- index. On a page change: action = baseIndex + (page-1)*12, re-evaluate parked
--- visibility, then re-check hold-release. ALL install sites (SetupBar,
--- RebuildBarPaging) call this so the handler is byte-identical everywhere --
--- the page change rewrites the secure "action" attribute (our buttons are
--- ID=0, so actionpage is never consulted).
+-- index. On a page change: stamp actionpage, slot = GetID() + (page-1)*12,
+-- re-evaluate parked visibility, then re-check hold-release. ALL install sites
+-- (SetupBar, RebuildBarPaging) call this so the handler is byte-identical
+-- everywhere. Buttons use SetID(i); CalculateAction path 1 reads actionpage.
 --
 -- The visibility half is gated on eab-showempty EXISTING: it is stamped by
 -- ApplyAlwaysShowButtons out of combat, and a button that has never seen a
@@ -2801,18 +2846,20 @@ end
 ]]
 
 function ns._eabBuildPageChildSnippet(baseIndex)
-    return ("local page = tonumber(message) or 1; local slot = %d + (page - 1) * 12; self:SetAttribute('action', slot)\n"):format(baseIndex)
-        .. ns._eabPageVisSnippet .. ns._eabEmpowerSnippet
+    -- baseIndex is unused: slot comes from GetID() + page. Signature kept so
+    -- every call site stays byte-identical without new locals.
+    return [[local page = tonumber(message) or 1; self:SetAttribute("actionpage", page); local slot = (self:GetID() or 0) + (page - 1) * 12
+]] .. ns._eabPageVisSnippet .. ns._eabEmpowerSnippet
 end
 
 -------------------------------------------------------------------------------
 --  Secure Bar Frame Creation
---  Each bar gets a SecureHandlerStateTemplate frame. Our buttons are created
---  with SetID(0) + an explicit "action" attribute, so CalculateAction resolves
---  the slot from that attribute (path 2), NOT from actionpage. Paging works by
---  the bar's _onstate-page handler doing ChildUpdate("eab-page", page), and each
---  button's _childupdate-eab-page snippet rewriting its "action" attribute. The
---  frame "actionpage" attribute is kept only for insecure range-check reads.
+--  Each bar gets a SecureHandlerStateTemplate frame. Buttons use SetID(i) +
+--  useparent-actionpage (template OnLoad); CalculateAction path 1 reads
+--  actionpage from the bar. Paging: _onstate-page writes actionpage and
+--  ChildUpdate("eab-page") so each button's snippet stamps actionpage (firing
+--  OnAttributeChanged -> UpdateAction) plus visibility/empower. The frame
+--  "actionpage" attribute is also the insecure range-check source.
 -------------------------------------------------------------------------------
 local function CreateBarFrame(info)
     local key = info.key
@@ -2874,19 +2921,20 @@ local function CreateBarFrame(info)
         RegisterStateDriver(frame, "page", pagingConditions)
     end
 
-    -- Bars 2-8 (nativeActionPage) and 9-10 (customPage): buttons have static action
-    -- attrs set in SetupBar pointing at the bar's default page. Custom paging installs
-    -- a state driver + ChildUpdate to recalculate the action attr on page change --
-    -- identical machinery either way, differing only in the default page source.
+    -- Bars 2-8 (nativeActionPage) and 9-10 (customPage): actionpage is written
+    -- by a secure driver (constant string, or state-page + _onstate-page).
+    -- Custom paging installs a state driver + ChildUpdate to stamp actionpage
+    -- on each button -- identical machinery either way.
     local defaultPage = info.nativeActionPage or info.customPage
     if defaultPage then
-        frame:Execute(("self:SetAttribute('actionpage', %d)"):format(defaultPage))
+        RegisterAttributeDriver(frame, "actionpage", tostring(defaultPage))
 
         -- Configurable paging: install a state driver on top of the default
         -- page; when no conditions match, fall back to the bar's default.
         local barSettings = EAB and EAB.db and EAB.db.profile and EAB.db.profile.bars[key]
         local customPaging = barSettings and barSettings.paging
         if customPaging and next(customPaging) then
+            UnregisterAttributeDriver(frame, "actionpage")
             frame:SetAttributeNoHandler("_onstate-page", [[
                 local page = tonumber(newstate) or 1
                 self:SetAttribute("actionpage", page)
@@ -2989,15 +3037,13 @@ function ns.RebuildBarPaging(barKey)
         if customPaging and next(customPaging) then
             -- Install handler if not already present
             if not frame._eabPagingInstalled then
+                UnregisterAttributeDriver(frame, "actionpage")
                 frame:SetAttributeNoHandler("_onstate-page", [[
                     local page = tonumber(newstate) or 1
                     self:SetAttribute("actionpage", page)
                     self:ChildUpdate("eab-page", page)
                 ]])
                 frame._eabPagingInstalled = true
-                -- Must set the secure "action" attr (buttons are ID=0, so
-                -- CalculateAction never consults "actionpage"). Same builder
-                -- as SetupBar so paging added live behaves identically -- no /reload needed.
                 local btns = barButtons[barKey]
                 if btns then
                     for idx, btn in ipairs(btns) do
@@ -3015,7 +3061,8 @@ function ns.RebuildBarPaging(barKey)
         else
             -- No paging configured: remove state driver, restore fixed page
             UnregisterStateDriver(frame, "page")
-            frame:Execute(("self:SetAttribute('actionpage', %d)"):format(defaultPage))
+            RegisterAttributeDriver(frame, "actionpage", tostring(defaultPage))
+            frame:Execute([[ self:ChildUpdate("eab-page", self:GetAttribute("actionpage") or 1) ]])
         end
     end
 
@@ -3118,9 +3165,8 @@ ns.BuildBarButtons = function(info, frame, skipProtected)
                 local bindPrefix = BINDING_MAP[key]
                 if not skipProtected then
                     ApplyShapeHitRects(btn, buttonShape)
-                    -- Explicit action attr: CalculateAction sees it non-zero
-                    -- and returns it directly (path 2).
-                    btn:SetAttribute("action", slot)
+                    -- Path 1: ID already set in GetOrCreateButton. Do not write
+                    -- "action" from insecure Lua (taints PlaceAction on Forever).
                     if bindPrefix then
                         btn:SetAttributeNoHandler("binding", bindPrefix .. i)
                     end
@@ -3151,11 +3197,11 @@ ns.BuildBarButtons = function(info, frame, skipProtected)
                     btn:SetAttribute("showgrid", 1)
                 end
                 GetEABFlyout():RegisterButton(btn)
-                -- Page child-update: rewrites the secure "action" attr on a page
-                -- change, then re-checks hold-release. Shared builder so SetupBar
-                -- and RebuildBarPaging install byte-identical handlers.
-                if (key == "MainBar" or frame._eabPagingInstalled)
-                   and not btn:GetAttribute("_childupdate-eab-page") then
+                -- Page child-update: stamps actionpage on a page change (so
+                -- OnAttributeChanged -> UpdateAction), then vis + hold-release.
+                -- Installed on every action button so static bars get a one-shot
+                -- secure actionpage write at setup too.
+                if not btn:GetAttribute("_childupdate-eab-page") then
                     btn:SetAttributeNoHandler("_childupdate-eab-page", ns._eabBuildPageChildSnippet(i))
                 end
                 -- Empower re-check on slot change (spec swap, drag, etc.)
@@ -3309,7 +3355,7 @@ function ns.RepaintAssistIcons(suggestedSpell)
                     -- assist action carry a spinner entry.
                     local fd = btn and ns._eabFD[btn]
                     if fd and fd.assistSpin then
-                        local action = btn.GetAttribute and btn:GetAttribute("action") or btn.action
+                        local action = EAB_VTABLE.ActionSlot(btn)
                         if action and HasAction(action) and C_ActionBar
                            and C_ActionBar.IsAssistedCombatAction
                            and C_ActionBar.IsAssistedCombatAction(action) then
@@ -3401,7 +3447,7 @@ function ns.RefreshAssistCooldowns(suggestedSpell)
                     local btn = buttons[i]
                     local fd = btn and ns._eabFD[btn]
                     if fd and fd.assistSpin then
-                        local action = btn.GetAttribute and btn:GetAttribute("action") or btn.action
+                        local action = EAB_VTABLE.ActionSlot(btn)
                         if action and HasAction(action) and C_ActionBar
                            and C_ActionBar.IsAssistedCombatAction
                            and C_ActionBar.IsAssistedCombatAction(action) then
@@ -3438,7 +3484,7 @@ function ns.RefreshAssistSpinners()
                             spin:SetPoint("TOPLEFT", btn, "TOPLEFT", -outset, outset)
                             spin:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", outset, -outset)
                         end
-                        local action = btn.GetAttribute and btn:GetAttribute("action") or btn.action
+                        local action = EAB_VTABLE.ActionSlot(btn)
                         local isAssist = action and C_ActionBar and C_ActionBar.IsAssistedCombatAction
                             and C_ActionBar.IsAssistedCombatAction(action) or false
                         spin:SetShown(enabled and isAssist)
@@ -3749,7 +3795,7 @@ ns.ApplyBarDormancy = function(key, dormant)
             fd.evGated = nil
             ReRegisterButtonEvents(btn, "action")
         end
-        local a = btn:GetAttribute("action")
+        local a = EAB_VTABLE.ActionSlot(btn)
         if a and HasAction(a) then
             -- Icon/count/name/cooldown/desat/usable in one existing helper.
             EAB_VTABLE.ForceButtonRefresh(btn, a)
@@ -3946,7 +3992,7 @@ do
             local icon = btn.icon
             if not icon then return end
             if not action then
-                action = btn:GetAttribute("action")
+                action = EAB_VTABLE.ActionSlot(btn)
                 if not action or not HasAction(action) then return end
             end
             if cdInfo == nil then
@@ -4094,7 +4140,7 @@ do
         -- code (SecretArguments AllowedWhenUntainted), so the unconditional push goes
         -- through the duration-object sink.
         local function PushButtonCooldown(btn, visOn, ci, gDur)
-            local action = btn:GetAttribute("action")
+            local action = EAB_VTABLE.ActionSlot(btn)
             if not action or not HasAction(action) then return end
             local fd = EFD(btn)
             -- Assist host: its slot cooldown mirrors whatever the engine is
@@ -4312,7 +4358,7 @@ do
             -- mixin UpdateAction on all ~140 buttons per tick. A charge tick can only
             -- move charge visuals: recharge swipe, count text, charge-aware desat.
             for _, btn in ipairs(walkBtns) do
-                local action = btn:GetAttribute("action")
+                local action = EAB_VTABLE.ActionSlot(btn)
                 if action and HasAction(action) then
                     local fd = EFD(btn)
                     -- Unconditional fetch: fires only on charge ticks, and
@@ -4408,7 +4454,7 @@ do
         -- Used by the full walk below and the payload-targeted
         -- SPELL_UPDATE_ICON fast path; ns-hosted (200-local cap).
         ns._cdIconHeal = function(btn)
-            local action = btn:GetAttribute("action")
+            local action = EAB_VTABLE.ActionSlot(btn)
             if action and HasAction(action) then
                 local tex = GetActionTexture(action)
                 local fd = EFD(btn)
@@ -4435,7 +4481,7 @@ do
                                     -- Skip: range system owns vertex color for tinted buttons; force repaint once it releases.
                                     ufd.usableState = nil
                                 else
-                                local action = btn:GetAttribute("action")
+                                local action = EAB_VTABLE.ActionSlot(btn)
                                 if action and HasAction(action) then
                                     local isUsable, notEnoughMana = IsUsableAction(action)
                                     -- Tri-state memo: USABLE storms with every
@@ -4585,7 +4631,7 @@ do
                             if btns then
                                 local list = CdTakeTable()
                                 for _, btn in ipairs(btns) do
-                                    local a = btn:GetAttribute("action")
+                                    local a = EAB_VTABLE.ActionSlot(btn)
                                     if a and HasAction(a) then
                                         list[#list + 1] = btn
                                         local aType = GetActionInfo(a)
@@ -5122,7 +5168,7 @@ do
                                 local list2 = barButtons[info2.key]
                                 if list2 then
                                     for _, b2 in ipairs(list2) do
-                                        local a2 = b2:GetAttribute("action")
+                                        local a2 = EAB_VTABLE.ActionSlot(b2)
                                         if a2 and HasAction(a2) and b2.Count then
                                             -- Guard before coercing: same
                                             -- ordering fix as the charge-tick
@@ -5241,7 +5287,7 @@ do
                             local list2 = barButtons[info2.key]
                             if list2 then
                                 for _, b2 in ipairs(list2) do
-                                    local a2 = b2:GetAttribute("action")
+                                    local a2 = EAB_VTABLE.ActionSlot(b2)
                                     if a2 then
                                         local bucket = smap[a2]
                                         if not bucket then bucket = {}; smap[a2] = bucket end
@@ -5256,7 +5302,7 @@ do
                 if not ns._eabNoBtns then ns._eabNoBtns = {} end
                 if _slotFast then
                     for _, b2 in ipairs(_slotFast) do
-                        local a2 = b2:GetAttribute("action")
+                        local a2 = EAB_VTABLE.ActionSlot(b2)
                         if a2 == arg1 then
                             ns._eabSlotRefreshBtn(b2, a2)
                         end
@@ -5289,7 +5335,7 @@ do
                             -- fast path above; only arg1 == 0 ("all slots")
                             -- still walks every button here.
                             for _, btn in ipairs((_slotFast == nil) and btns or ns._eabNoBtns) do
-                                local action = btn:GetAttribute("action")
+                                local action = EAB_VTABLE.ActionSlot(btn)
                                 if action and (arg1 == 0 or arg1 == action) then
                                     ns._eabSlotRefreshBtn(btn, action)
                                 end
@@ -5307,7 +5353,7 @@ do
                             for _, btn in ipairs(btns) do
                                 local chargeCd = btn.chargeCooldown
                                 if chargeCd then
-                                    local action = btn:GetAttribute("action")
+                                    local action = EAB_VTABLE.ActionSlot(btn)
                                     local ok = action and HasAction(action)
                                     ns.UpdateChargeNumbersVisibility(btn, chargeCd,
                                         ok and C_ActionBar.GetActionCooldown(action) or nil,
@@ -5372,7 +5418,7 @@ do
                                 -- target swap, and it is memo-gated.
                                 if event ~= "PLAYER_TARGET_CHANGED" then
                                     -- Taint-safe refresh; avoids passing secret cooldown values through a tainted call.
-                                    local infreqAction = btn:GetAttribute("action")
+                                    local infreqAction = EAB_VTABLE.ActionSlot(btn)
                                     EAB_VTABLE.ForceButtonRefresh(btn, infreqAction)
                                     RefreshCooldownVisuals(btn)
                                     -- Two channels ForceButtonRefresh doesn't own (same
@@ -5389,7 +5435,7 @@ do
                                 if ufd.rangeTinted then
                                     ufd.usableState = nil
                                 else
-                                local action = btn:GetAttribute("action")
+                                local action = EAB_VTABLE.ActionSlot(btn)
                                 if action and HasAction(action) then
                                     local isUsable, notEnoughMana = IsUsableAction(action)
                                     -- Same tri-state memo as the USABLE branch.
@@ -6715,7 +6761,7 @@ local function MakeButtonSquare(btn)
                 local spin = ns.EnsureAssistSpinner(self, rtf)
                 local p2 = EAB.db and EAB.db.profile
                 local enabled = not p2 or p2.obaIconEnabled ~= false
-                local action = self.GetAttribute and self:GetAttribute("action") or self.action
+                local action = EAB_VTABLE.ActionSlot(self)
                 local isAssist = action and C_ActionBar and C_ActionBar.IsAssistedCombatAction
                     and C_ActionBar.IsAssistedCombatAction(action) or false
                 spin:SetShown(enabled and isAssist)
@@ -7738,7 +7784,7 @@ function EAB:RefreshAllCounts()
             if btns then
                 for _, btn in ipairs(btns) do
                     if btn.Count then
-                        local action = btn:GetAttribute("action")
+                        local action = EAB_VTABLE.ActionSlot(btn)
                         if action and HasAction(action) then
                             ns._EABZeroCountAlpha(EFD(btn), btn.Count,
                                 C_ActionBar.GetActionDisplayCount(action), action)
@@ -8182,19 +8228,14 @@ end
 function EAB_VTABLE.MainBarPageSync.InstallButton(btn)
     if not btn or btn:GetAttribute("_eabPageSyncInstalled") or InCombatLockdown() then return end
 
-    -- Bake the base index directly into the snippet as a literal so it
-    -- doesn't depend on attribute reads in the restricted environment.
-    local info = buttonToBar[btn]
-    local baseIdx = info and info.index or 1
-
-    -- Only the slot arithmetic is interpolated. The body is concatenated raw:
-    -- it contains a modulo, and string.format eats a bare "%" as a broken
-    -- conversion spec.
+    -- Slot arithmetic uses GetID(); only NUM_ACTIONBAR_BUTTONS is interpolated.
+    -- The vis body is concatenated raw: it contains a modulo, and string.format
+    -- eats a bare "%" as a broken conversion spec.
     btn:SetAttributeNoHandler("_childupdate-eab-page", ([[
         local page = tonumber(message) or 1
-        local slot = %d + (page - 1) * %d
-        self:SetAttribute("action", slot)
-    ]]):format(baseIdx, NUM_ACTIONBAR_BUTTONS) .. [[
+        self:SetAttribute("actionpage", page)
+        local slot = (self:GetID() or 0) + (page - 1) * %d
+    ]]):format(NUM_ACTIONBAR_BUTTONS) .. [[
         local withinCutoff = self:GetAttribute("eab-withincutoff") ~= 0
         local visible = withinCutoff
 
@@ -8251,23 +8292,12 @@ local _range = {
 }
 
 -- Resolve a button's action slot without reading btn.action: protected
--- (secret value in Midnight), reading it in combat taints. Uses a lookup
--- table built at setup; MainBar derives the page offset from the bar frame's
--- actionpage attribute (set by _onstate-page).
+-- (secret value in Midnight), reading it in combat taints. ID + actionpage
+-- on every action bar (not just MainBar) so custom paging is correct too.
 local function GetButtonActionSlot(btn)
     local info = buttonToBar[btn]
-    if not info then return nil end
-    local offset = BAR_SLOT_OFFSETS[info.barKey]
-    if not offset then return nil end
-    if info.barKey == "MainBar" then
-        -- actionpage is set by the _onstate-page handler in the restricted env
-        -- and reflects vehicle/override/form pages, unlike
-        -- C_ActionBar.GetActionBarPage() which tracks only the manual page.
-        local frame = barFrames["MainBar"]
-        local page = frame and tonumber(frame:GetAttribute("actionpage")) or EAB_VTABLE.GetActionBarPage()
-        offset = (page - 1) * NUM_ACTIONBAR_BUTTONS
-    end
-    return offset + info.index
+    if not info or not BAR_SLOT_OFFSETS[info.barKey] then return nil end
+    return EAB_VTABLE.ActionSlot(btn)
 end
 
 -- Apply or remove the range tint on a single button
@@ -11110,7 +11140,7 @@ do
     -- Attribute first: secure paging writes "action", the authoritative slot
     -- (see ForceCooldownPaint); btn.action is a derived mirror.
     local function ButtonSpell(btn)
-        local action = btn.GetAttribute and btn:GetAttribute("action")
+        local action = EAB_VTABLE.ActionSlot(btn)
         if action == nil then action = btn.action end
         if action == nil then return nil end
         local atype, id, subType = GetActionInfo(action)
@@ -11601,7 +11631,7 @@ function EAB:RefreshChargeRechargeNumbers()
                 for _, btn in ipairs(buttons) do
                     local chargeCd = btn.chargeCooldown
                     if chargeCd then
-                        local action = btn:GetAttribute("action")
+                        local action = EAB_VTABLE.ActionSlot(btn)
                         local ok = action and HasAction(action)
                         ns.UpdateChargeNumbersVisibility(btn, chargeCd,
                             ok and C_ActionBar.GetActionCooldown(action) or nil,
@@ -11765,7 +11795,7 @@ local function UpdateKeybinds()
                     -- rank 1). Click routing exists ONLY where a native
                     -- command cannot express the slot: custom-paged bars
                     -- (above) and the custom bars.
-                    local slot = btn:GetAttribute("action")
+                    local slot = EAB_VTABLE.ActionSlot(btn)
                     -- Custom bars (Bar9/Bar10) have no native binding command, so
                     -- their keys MUST click-route; SetOverrideBinding to a
                     -- non-existent command does nothing. isPH tracks empower
@@ -13169,7 +13199,7 @@ function EAB:OnInitialize()
                     for _, btn in ipairs(btns) do
                         local rankAtlas
                         if featureOn then
-                            local action = btn:GetAttribute("action") or 0
+                            local action = EAB_VTABLE.ActionSlot(btn) or 0
                             if action > 0 then
                                 -- Blizzard's own source, from live ActionButton.lua
                                 -- UpdateProfessionQuality: a dedicated action API that
@@ -13520,18 +13550,13 @@ function EAB:FinishSetup()
             end
             -- Register secure handler refs now that buttons exist
             SecureSetupHandler_PrepareRefs()
-            -- Apply the current page to MainBar buttons. The state driver
-            -- evaluated during CreateBarFrame (before buttons existed), so
-            -- buttons still have their initial action=slot from
-            -- GetOrCreateButton; recalculate using the actual current page.
-            local mbFrame = barFrames["MainBar"]
-            if mbFrame then
-                local curPage = tonumber(mbFrame:GetAttribute("state-page")) or 1
-                local mbBtns = barButtons["MainBar"]
-                if mbBtns then
-                    for i, btn in ipairs(mbBtns) do
-                        btn:SetAttribute("action", i + (curPage - 1) * 12)
-                    end
+            -- Apply the current page to MainBar (and every other bar) via a
+            -- secure ChildUpdate so actionpage is written from restricted
+            -- code and UpdateAction caches an untainted self.action.
+            for _, info in ipairs(BAR_CONFIG) do
+                local fr = barFrames[info.key]
+                if fr and not info.isStance and not info.isPetBar then
+                    fr:Execute([[ self:ChildUpdate("eab-page", self:GetAttribute("actionpage") or self:GetAttribute("state-page") or 1) ]])
                 end
             end
             RestoreBarPositions()
@@ -13581,14 +13606,9 @@ function EAB:FinishSetup()
                         local btn = buttons[i]
                         if btn and btn._secureSlotIdx then
                             local actionSlot = 0
-                            if key == "MainBar" then
-                                -- For MainBar, actionSlot encodes the button index (1-12)
+                            if not info.isStance then
+                                -- Button index 1-N: SetID in the secure handler.
                                 actionSlot = i
-                            elseif info.isPetBar then
-                                -- PetActionButtons use their index (1-10) as their slot ID
-                                actionSlot = i
-                            elseif not info.isStance then
-                                actionSlot = slotOffset + i
                             end
                             layoutData[btn._secureSlotIdx] = {
                                 barKey = key,
@@ -14509,7 +14529,7 @@ function EAB:FinishSetup()
                     if btns then
                         for _, btn in ipairs(btns) do
                             if btn then
-                                local a = btn:GetAttribute("action")
+                                local a = EAB_VTABLE.ActionSlot(btn)
                                 local t2, id, st
                                 if a then t2, id, st = GetActionInfo(a) end
                                 local tok
@@ -14548,7 +14568,7 @@ function EAB:FinishSetup()
                     end
                     for i = 1, #changed do
                         local btn = changed[i]
-                        EAB_VTABLE.ForceButtonRefresh(btn, btn:GetAttribute("action"))
+                        EAB_VTABLE.ForceButtonRefresh(btn, EAB_VTABLE.ActionSlot(btn))
                     end
                 end
                 return
@@ -14569,7 +14589,7 @@ function EAB:FinishSetup()
                     if btns then
                         for _, btn in ipairs(btns) do
                             if btn then
-                                EAB_VTABLE.ForceButtonRefresh(btn, btn:GetAttribute("action"))
+                                EAB_VTABLE.ForceButtonRefresh(btn, EAB_VTABLE.ActionSlot(btn))
                             end
                         end
                     end
@@ -16655,7 +16675,7 @@ local function EAB_SetQuickKeybindEffects(btn, show)
     end
     -- Suppress/restore the secure action so spells don't fire during QKB.
     -- Only action buttons (those with an action attr) need this.
-    if not InCombatLockdown() and btn.commandName and btn:GetAttribute("action") then
+    if not InCombatLockdown() and btn.commandName and EAB_VTABLE.ActionSlot(btn) then
         if show then
             btn:SetAttribute("type", nil)
         else
