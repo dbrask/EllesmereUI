@@ -1596,8 +1596,13 @@ do
         end
     ]])
 
-    -- Secure table of bar frames that receive state broadcasts
-    OverrideController:Execute([[ _eabBarFrames = newtable() ]])
+    -- Secure table of bar frames that receive state broadcasts. Created
+    -- lazily (see ActionButtonController:EnsureTables for why).
+    function OverrideController:EnsureTables()
+        if self._eabTablesReady then return end
+        self:Execute([[ _eabBarFrames = _eabBarFrames or newtable() ]])
+        self._eabTablesReady = true
+    end
 
     -- overrideui driven by [overridebar][vehicleui] macro instead of parenting
     -- to OverrideActionBar (which would taint the protected frame).
@@ -1618,6 +1623,7 @@ end
 -- Add a bar frame to the watch list. Deduped in the snippet: the secure list
 -- can never be pruned, so a re-registration would grow it and every sweep permanently.
 local function RegisterBarWithOverrideController(frame)
+    OverrideController:EnsureTables()
     OverrideController:SetFrameRef("add", frame)
     OverrideController:Execute([[
         local f = self:GetFrameRef("add")
