@@ -3906,7 +3906,9 @@ local function ApplyOmniumFolio()
     -- in an empty Garrison) and repaints the current expansion icon, so this never forces
     -- a stale button unlike a raw Show(). Its Show() re-fires our reposition hook.
     PositionOmniumFolio(btn)
-    if not btn:IsShown() and btn.RefreshButton then
+    -- RefreshButton dereferences the ExpansionLandingPage global; Forever ships the
+    -- minimap button but no landing page, so guard or Blizzard's code errors.
+    if not btn:IsShown() and btn.RefreshButton and _G.ExpansionLandingPage then
         btn:RefreshButton(true)
     end
 end

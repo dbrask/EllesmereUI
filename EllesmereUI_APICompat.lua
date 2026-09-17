@@ -48,3 +48,25 @@ alias("IsEquippableItem", Item, "IsEquippableItem")
 local CIS = _G.C_ItemSocketInfo
 alias("GetNumSockets", CIS, "GetNumSockets")
 alias("CloseSocketInfo", CIS, "CloseSocketInfo")
+
+-- Forever identification for the rest of the suite. Forever is Mainline at
+-- tocversion 16001 (retail 12.x is 120000+); nothing else distinguishes them
+-- from Lua yet, so the interface number is the switch.
+local ifaceVersion = select(4, GetBuildInfo())
+EUI_IS_FOREVER = type(ifaceVersion) == "number" and ifaceVersion < 100000
+
+-- LibSpecialization (external, cannot be patched in-tree) routes an
+-- "Unknown specId" through geterrorhandler() for spec IDs missing from its
+-- tables. Forever's classes carry new spec IDs, so every login and spec
+-- change would raise an error that means nothing here. Drop only that
+-- message, only on Forever; the lib still returns nil for the spec, which
+-- the callers already handle.
+if EUI_IS_FOREVER then
+    local origHandler = geterrorhandler()
+    seterrorhandler(function(msg, ...)
+        if type(msg) == "string" and msg:find("^LibSpecialization: Unknown specId") then
+            return
+        end
+        return origHandler(msg, ...)
+    end)
+end

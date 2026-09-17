@@ -1609,27 +1609,27 @@ do
         end
     ]])
 
-    -- Secure table of bar frames that receive state broadcasts. Created
-    -- lazily (see ActionButtonController:EnsureTables for why).
+    -- Secure table of bar frames and the state drivers, both installed
+    -- lazily (see ActionButtonController:EnsureTables for why): on Forever,
+    -- neither Execute nor RegisterAttributeDriver can compile during file load.
     function OverrideController:EnsureTables()
         if self._eabTablesReady then return end
         self:Execute([[ _eabBarFrames = _eabBarFrames or newtable() ]])
+        -- overrideui driven by [overridebar][vehicleui] macro instead of
+        -- parenting to OverrideActionBar (which would taint the protected frame).
+        for attr, driver in pairs({
+            form = "[form]1;0",
+            overridebar = "[overridebar]1;0",
+            overrideui = "[overridebar][vehicleui]1;0",
+            possessbar = "[possessbar]1;0",
+            sstemp = "[shapeshift]1;0",
+            vehicle = "[@vehicle,exists]1;0",
+            vehicleui = "[vehicleui]1;0",
+            petbattleui = "[petbattle]1;0",
+        }) do
+            RegisterAttributeDriver(self, attr, driver)
+        end
         self._eabTablesReady = true
-    end
-
-    -- overrideui driven by [overridebar][vehicleui] macro instead of parenting
-    -- to OverrideActionBar (which would taint the protected frame).
-    for attr, driver in pairs({
-        form = "[form]1;0",
-        overridebar = "[overridebar]1;0",
-        overrideui = "[overridebar][vehicleui]1;0",
-        possessbar = "[possessbar]1;0",
-        sstemp = "[shapeshift]1;0",
-        vehicle = "[@vehicle,exists]1;0",
-        vehicleui = "[vehicleui]1;0",
-        petbattleui = "[petbattle]1;0",
-    }) do
-        RegisterAttributeDriver(OverrideController, attr, driver)
     end
 end
 
