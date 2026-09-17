@@ -15,9 +15,16 @@
 -- runs is the popup below telling the user to go back to the pre-12.1
 -- release. Reverting restores the addon with settings exactly as they were.
 --
--- Fail-open by design: if the interface number cannot be read as a number,
--- the suite runs normally -- the failsafe must never break a healthy client.
--- On 12.1+ this file is a single comparison and exits; no globals, no frames.
+-- Do not use a bare interface-number comparison. Midnight Standard reports
+-- 120100+, but WoW: Forever reports tocversion 16001 while shipping the 12.1
+-- API surface -- `16001 < 120100` would disable the entire suite there.
+-- Probe for a 12.1-only C API instead. Fail-open: missing/unreadable
+-- interface number, or a present Midnight API, lets the suite run -- the
+-- failsafe must never break a healthy client. On a capable 12.1+ client
+-- this file is a single table check and exits; no globals, no frames.
+
+-- C_AuraContainerUtil is Midnight (12.1+) only; present on Standard and Forever.
+if type(C_AuraContainerUtil) == "table" then return end
 
 local iface = select(4, GetBuildInfo())
 if not (type(iface) == "number" and iface < 120100) then return end
