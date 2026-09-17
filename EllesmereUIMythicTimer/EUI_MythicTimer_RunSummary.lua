@@ -1399,7 +1399,7 @@ local function FillLootCell(cell, m)
     if m.lootID or m.lootLink then
         local id = m.lootID or IDFromLink(m.lootLink)
         local icon = id and C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(id)
-        cell.tex:SetTexture(icon or "Interface\Icons\INV_Misc_QuestionMark")
+        cell.tex:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
         cell.tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     else
         cell.tex:SetTexture(nil)
