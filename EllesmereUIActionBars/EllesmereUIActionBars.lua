@@ -1311,10 +1311,21 @@ local SHOWGRID = {
 -- Lua-side button registry: [button] = actionSlot
 local _controllerButtons = {}
 
-ActionButtonController:Execute([[
-    _eabBtnMap = newtable()
-    _eabPendingVis = newtable()
-]])
+-- The controller's secure tables are created lazily rather than in the main
+-- chunk: on the Forever client, restricted-environment compilation
+-- (loadstring_untainted) is not yet available while addons are still
+-- loading, so a file-load-time Execute fails and every later snippet that
+-- touches _eabBtnMap errors. /run at login works, so deferring to first use
+-- is enough. (A method on the controller frame, not a new local: this file
+-- is at the 200-local limit for the main chunk.)
+function ActionButtonController:EnsureTables()
+    if self._eabTablesReady then return end
+    ActionButtonController:Execute([[
+        _eabBtnMap = _eabBtnMap or newtable()
+        _eabPendingVis = _eabPendingVis or newtable()
+    ]])
+    self._eabTablesReady = true
+end
 
 -- Secure method: SetShowGrid (bitwise flag toggle). Restricted Lua has no bit
 -- library, so modular arithmetic tests/flips individual bits in the bitmask.
@@ -1393,6 +1404,7 @@ local BTN_ON_SHOW_HIDE = [[
 -- (e.g. during spell drag in combat), propagate to all our buttons.
 local function InitShowGridMonitor()
     if not ActionButton1 then return end
+    ActionButtonController:EnsureTables()
     ActionButtonController:WrapScript(ActionButton1, "OnAttributeChanged", [[
         if name ~= "showgrid" then return end
         for r = 2, 4, 2 do
@@ -1405,6 +1417,7 @@ end
 -- Register a button with the controller (adds WrapScript handlers + secure table entry)
 local function RegisterButtonWithController(btn)
     if _controllerButtons[btn] then return end
+    ActionButtonController:EnsureTables()
 
     -- On /reload, Lua locals reset but frames survive: if the button already
     -- carries our secure snippets, skip WrapScript+Execute (re-wrapping in
